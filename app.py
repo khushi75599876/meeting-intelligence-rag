@@ -2,8 +2,8 @@ import streamlit as st
 from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from groq import Groq
 import io
 
 # -------------------------
@@ -11,12 +11,25 @@ import io
 # -------------------------
 st.set_page_config(page_title="Meeting Intelligence RAG", layout="wide")
 st.title("Meeting Intelligence RAG System")
-st.write("Upload a meeting transcript and get AI-powered summaries, decisions, action items, and Q&A.")
+st.write("Upload a meeting transcript (TXT, PDF, or PPTX) and get AI-powered insights.")
+
+# -------------------------
+# Groq Client
+# -------------------------
+client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+
+def ask_groq(prompt):
+    response = client.chat.completions.create(
+        model="llama3-8b-8192",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=300,
+        temperature=0.3,
+    )
+    return response.choices[0].message.content.strip()
 
 # -------------------------
 # File Parsers
 # -------------------------
-
 def extract_text_from_txt(file):
     return file.read().decode("utf-8")
 
@@ -39,8 +52,8 @@ def extract_text_from_pptx(file):
         from pptx import Presentation
         prs = Presentation(io.BytesIO(file.read()))
         text = ""
-        for slide_num, slide in enumerate(prs.slides, 1):
-            text += f"\n--- Slide {slide_num} ---\n"
+        for i, slide in enumerate(prs.slides, 1):
+            text += f"\n--- Slide {i} ---\n"
             for shape in slide.shapes:
                 if hasattr(shape, "text") and shape.text.strip():
                     text += shape.text.strip() + "\n"
@@ -50,55 +63,25 @@ def extract_text_from_pptx(file):
         return ""
 
 # -------------------------
-# Load Models (cached)
+# Embedding Model (small + lightweight)
 # -------------------------
-
 @st.cache_resource
 def load_embedding_model():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
-@st.cache_resource
-def load_llm():
-    model_name = "google/flan-t5-large"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-    return tokenizer, model
-
 # -------------------------
-# LLM Helper — safely handles token limit
+# Get top relevant chunks via FAISS
 # -------------------------
-
-def run_llm(tokenizer, model, prompt, max_new_tokens=150):
-    inputs = tokenizer(
-        prompt,
-        return_tensors="pt",
-        truncation=True,
-        max_length=512
-    )
-    outputs = model.generate(
-        **inputs,
-        max_new_tokens=max_new_tokens,
-        num_beams=4,
-        early_stopping=True,
-        no_repeat_ngram_size=3
-    )
-    return tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
-
-# -------------------------
-# Smart context: get top chunks for a query
-# -------------------------
-
 def get_top_chunks(query, embed_model, index, chunks, k=5):
     q_vec = embed_model.encode([query])
-    distances, indices = index.search(np.array(q_vec), k=k)
-    return " ".join([chunks[i] for i in indices[0] if i < len(chunks)])
+    distances, indices = index.search(np.array(q_vec), k=min(k, len(chunks)))
+    return "\n\n".join([chunks[i] for i in indices[0]])
 
 # -------------------------
 # File Upload
 # -------------------------
-
 uploaded_file = st.file_uploader(
-    "Upload Transcript (TXT, PDF, or PPTX)",
+    "Upload Transcript",
     type=["txt", "pdf", "pptx"]
 )
 
@@ -117,53 +100,42 @@ if uploaded_file:
             st.stop()
 
     if not text:
-        st.error("Could not extract any text from the file. Please check the file.")
+        st.error("No text could be extracted. Please check your file.")
         st.stop()
 
     st.subheader("Transcript Preview")
     st.write(text[:1000] + ("..." if len(text) > 1000 else ""))
-    st.caption(f"Total characters extracted: {len(text)}")
+    st.caption(f"Total characters: {len(text)}")
 
     # -------------------------
     # Chunking
     # -------------------------
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=400,
-        chunk_overlap=80
-    )
+    splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=80)
     chunks = splitter.split_text(text)
-
-    # -------------------------
-    # Load models
-    # -------------------------
-    with st.spinner("Loading AI models (first load takes ~1 min)..."):
-        embed_model = load_embedding_model()
-        tokenizer, llm_model = load_llm()
 
     # -------------------------
     # Build FAISS index
     # -------------------------
-    embeddings = embed_model.encode(chunks)
-    dimension = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dimension)
-    index.add(np.array(embeddings))
+    with st.spinner("Building search index..."):
+        embed_model = load_embedding_model()
+        embeddings = embed_model.encode(chunks)
+        dimension = embeddings.shape[1]
+        index = faiss.IndexFlatL2(dimension)
+        index.add(np.array(embeddings))
 
     # -------------------------
     # Meeting Summary
-    # — use top chunks relevant to "summary overview"
     # -------------------------
     st.subheader("Meeting Summary")
     with st.spinner("Generating summary..."):
         summary_context = get_top_chunks(
-            "main topic discussion agenda overview", embed_model, index, chunks, k=6
+            "meeting agenda discussion main topics overview", embed_model, index, chunks, k=6
         )
-        summary_prompt = (
-            "Read the meeting notes below and write a clear, concise summary "
-            "of what the meeting was about in 3-4 sentences.\n\n"
-            f"Meeting notes:\n{summary_context}\n\n"
-            "Summary:"
+        summary = ask_groq(
+            f"You are a meeting analyst. Read the meeting notes below and write a clear, "
+            f"concise summary in 3-4 sentences covering the main topics discussed.\n\n"
+            f"Meeting notes:\n{summary_context}\n\nSummary:"
         )
-        summary = run_llm(tokenizer, llm_model, summary_prompt, max_new_tokens=150)
     st.write(summary)
 
     # -------------------------
@@ -172,16 +144,14 @@ if uploaded_file:
     st.subheader("Key Decisions")
     with st.spinner("Extracting decisions..."):
         decision_context = get_top_chunks(
-            "decision agreed decided approved confirmed concluded", embed_model, index, chunks, k=5
+            "decision agreed approved confirmed concluded finalized", embed_model, index, chunks, k=5
         )
-        decision_prompt = (
-            "From the meeting notes below, list the key decisions that were made. "
-            "Each decision should be on a new line starting with a dash.\n\n"
-            f"Meeting notes:\n{decision_context}\n\n"
-            "Key decisions made:\n-"
+        decisions = ask_groq(
+            f"You are a meeting analyst. From the meeting notes below, extract all key decisions "
+            f"that were made. List each decision on a new line starting with a bullet point (-).\n\n"
+            f"Meeting notes:\n{decision_context}\n\nKey decisions:"
         )
-        decisions = run_llm(tokenizer, llm_model, decision_prompt, max_new_tokens=150)
-    st.write("- " + decisions if not decisions.startswith("-") else decisions)
+    st.write(decisions)
 
     # -------------------------
     # Action Items
@@ -189,40 +159,28 @@ if uploaded_file:
     st.subheader("Action Items")
     with st.spinner("Extracting action items..."):
         action_context = get_top_chunks(
-            "task assigned will do responsible person action item follow up", embed_model, index, chunks, k=5
+            "task assigned responsible person will do follow up deadline", embed_model, index, chunks, k=5
         )
-        action_prompt = (
-            "From the meeting notes below, extract specific tasks assigned to people. "
-            "Format each task as: Person Name - Task description\n\n"
-            f"Meeting notes:\n{action_context}\n\n"
-            "Action items:\n"
+        actions = ask_groq(
+            f"You are a meeting analyst. From the meeting notes below, extract all action items "
+            f"with the responsible person. Format each as:\n- [Person Name]: [Task]\n\n"
+            f"Meeting notes:\n{action_context}\n\nAction items:"
         )
-        actions = run_llm(tokenizer, llm_model, action_prompt, max_new_tokens=150)
     st.write(actions)
 
     # -------------------------
-    # Question Answering
+    # Question Answering (RAG)
     # -------------------------
     st.subheader("Ask a Question About the Meeting")
-    question = st.text_input("Type your question here and press Enter")
+    question = st.text_input("Type your question and press Enter")
 
     if question and question.strip():
-        with st.spinner("Searching transcript and generating answer..."):
+        with st.spinner("Finding answer..."):
             context = get_top_chunks(question, embed_model, index, chunks, k=5)
-            qa_prompt = (
-                "You are a helpful assistant. Answer the question below using "
-                "only the provided meeting context. Be specific and factual.\n\n"
-                f"Context:\n{context}\n\n"
-                f"Question: {question}\n\n"
-                "Answer:"
+            answer = ask_groq(
+                f"You are a helpful meeting assistant. Answer the question below using ONLY "
+                f"the provided meeting context. Be specific and factual. If the answer is not "
+                f"in the context, say 'This information was not found in the transcript.'\n\n"
+                f"Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"
             )
-            answer = run_llm(tokenizer, llm_model, qa_prompt, max_new_tokens=150)
-
-        st.subheader("Answer")
-        st.success(answer)
-
-        if not answer or len(answer) < 5:
-            st.warning(
-                "The model could not find a confident answer. "
-                "Try rephrasing your question or check if the information is in the transcript."
-            )
+        st.success(answer)    
