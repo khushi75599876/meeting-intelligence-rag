@@ -18,14 +18,24 @@ st.write("Upload a meeting transcript (TXT, PDF, or PPTX) and get AI-powered ins
 # -------------------------
 client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
+# FIX 1: Hard cap on context length sent to Groq (prevents BadRequestError)
+MAX_CONTEXT_CHARS = 3000
+
 def ask_groq(prompt):
-    response = client.chat.completions.create(
-        model="llama3-8b-8192",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=300,
-        temperature=0.3,
-    )
-    return response.choices[0].message.content.strip()
+    # FIX 2: Trim the full prompt if it's too long
+    if len(prompt) > 4000:
+        prompt = prompt[:4000]
+    try:
+        response = client.chat.completions.create(
+            model="llama3-8b-8192",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=300,
+            temperature=0.3,
+        )
+        return response.choices[0].message.content.strip()
+    # FIX 3: Catch error gracefully instead of crashing the app
+    except Exception as e:
+        return f"Could not generate response. Please try again. (Error: {str(e)[:100]})"
 
 # -------------------------
 # File Parsers
@@ -63,7 +73,7 @@ def extract_text_from_pptx(file):
         return ""
 
 # -------------------------
-# Embedding Model (small + lightweight)
+# Embedding Model
 # -------------------------
 @st.cache_resource
 def load_embedding_model():
@@ -71,11 +81,14 @@ def load_embedding_model():
 
 # -------------------------
 # Get top relevant chunks via FAISS
+# FIX 4: Added max_chars to hard-cap context size
 # -------------------------
-def get_top_chunks(query, embed_model, index, chunks, k=5):
+def get_top_chunks(query, embed_model, index, chunks, k=3, max_chars=MAX_CONTEXT_CHARS):
     q_vec = embed_model.encode([query])
     distances, indices = index.search(np.array(q_vec), k=min(k, len(chunks)))
-    return "\n\n".join([chunks[i] for i in indices[0]])
+    context = "\n\n".join([chunks[i] for i in indices[0]])
+    # Trim to max_chars to stay safely within Groq's token limit
+    return context[:max_chars]
 
 # -------------------------
 # File Upload
@@ -129,11 +142,12 @@ if uploaded_file:
     st.subheader("Meeting Summary")
     with st.spinner("Generating summary..."):
         summary_context = get_top_chunks(
-            "meeting agenda discussion main topics overview", embed_model, index, chunks, k=6
+            "meeting agenda discussion main topics overview",
+            embed_model, index, chunks, k=3  # FIX: was k=6, now k=3
         )
         summary = ask_groq(
-            f"You are a meeting analyst. Read the meeting notes below and write a clear, "
-            f"concise summary in 3-4 sentences covering the main topics discussed.\n\n"
+            f"You are a meeting analyst. Read the meeting notes below and write a "
+            f"clear summary in 3-4 sentences covering the main topics discussed.\n\n"
             f"Meeting notes:\n{summary_context}\n\nSummary:"
         )
     st.write(summary)
@@ -144,11 +158,12 @@ if uploaded_file:
     st.subheader("Key Decisions")
     with st.spinner("Extracting decisions..."):
         decision_context = get_top_chunks(
-            "decision agreed approved confirmed concluded finalized", embed_model, index, chunks, k=5
+            "decision agreed approved confirmed concluded finalized",
+            embed_model, index, chunks, k=3
         )
         decisions = ask_groq(
-            f"You are a meeting analyst. From the meeting notes below, extract all key decisions "
-            f"that were made. List each decision on a new line starting with a bullet point (-).\n\n"
+            f"You are a meeting analyst. From the meeting notes below, list the key "
+            f"decisions made. Each on a new line starting with a dash (-).\n\n"
             f"Meeting notes:\n{decision_context}\n\nKey decisions:"
         )
     st.write(decisions)
@@ -159,11 +174,12 @@ if uploaded_file:
     st.subheader("Action Items")
     with st.spinner("Extracting action items..."):
         action_context = get_top_chunks(
-            "task assigned responsible person will do follow up deadline", embed_model, index, chunks, k=5
+            "task assigned responsible person will do follow up deadline",
+            embed_model, index, chunks, k=3
         )
         actions = ask_groq(
-            f"You are a meeting analyst. From the meeting notes below, extract all action items "
-            f"with the responsible person. Format each as:\n- [Person Name]: [Task]\n\n"
+            f"You are a meeting analyst. From the meeting notes below, extract tasks "
+            f"assigned to people. Format: - [Person]: [Task]\n\n"
             f"Meeting notes:\n{action_context}\n\nAction items:"
         )
     st.write(actions)
@@ -176,11 +192,13 @@ if uploaded_file:
 
     if question and question.strip():
         with st.spinner("Finding answer..."):
-            context = get_top_chunks(question, embed_model, index, chunks, k=5)
+            context = get_top_chunks(
+                question, embed_model, index, chunks, k=3
+            )
             answer = ask_groq(
-                f"You are a helpful meeting assistant. Answer the question below using ONLY "
-                f"the provided meeting context. Be specific and factual. If the answer is not "
-                f"in the context, say 'This information was not found in the transcript.'\n\n"
+                f"You are a helpful meeting assistant. Answer the question below using "
+                f"ONLY the provided context. If the answer is not in the context, say "
+                f"'This information was not found in the transcript.'\n\n"
                 f"Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"
             )
-        st.success(answer)    
+        st.success(answer)
