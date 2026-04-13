@@ -1,7 +1,8 @@
 # Meeting Intelligence RAG System
 
-This project is a **RAG-based AI system** that analyzes meeting transcripts and automatically generates:
+Live Demo : https://meeting-intelligence-rag-bvamefydtcozp6sow7zgqf.streamlit.app/
 
+This project is a **RAG-based AI system** that analyzes meeting transcripts and automatically generates:
 * Meeting summaries
 * Key decisions
 * Action items
