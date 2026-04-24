@@ -5,6 +5,7 @@ import numpy as np
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from groq import Groq
 import io
+import time  # ⏱️ NEW (for latency)
 
 # -------------------------
 # Page Config
@@ -112,6 +113,15 @@ if uploaded_file:
         st.stop()
 
     # -------------------------
+    # 📊 File Size Metrics (NEW)
+    # -------------------------
+    word_count = len(text.split())
+    char_count = len(text)
+
+    st.write(f"📄 Words: {word_count}")
+    st.write(f"🔤 Characters: {char_count}")
+
+    # -------------------------
     # Chunking + FAISS Index
     # -------------------------
     splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=80)
@@ -125,7 +135,7 @@ if uploaded_file:
         index.add(np.array(embeddings))
 
     # -------------------------
-    # Meeting Summary (auto-generated once)
+    # Meeting Summary
     # -------------------------
     st.subheader("Meeting Summary")
     with st.spinner("Generating summary..."):
@@ -143,18 +153,30 @@ if uploaded_file:
     st.divider()
 
     # -------------------------
-    # Q&A Search Bar
+    # Q&A with Latency (UPDATED)
     # -------------------------
     st.subheader("Ask a Question About the Meeting")
     question = st.text_input("Type your question and press Enter", placeholder="e.g. Who is responsible for the database fix?")
 
     if question and question.strip():
+
+        start_time = time.time()  # ⏱️ START TIMER
+
         with st.spinner("Finding answer..."):
             context = get_top_chunks(question, embed_model, index, chunks, k=3)
+
             answer = ask_groq(
                 f"You are a helpful meeting assistant. Answer the question below using "
                 f"ONLY the provided context. If the answer is not in the context, say "
                 f"'This information was not found in the transcript.'\n\n"
                 f"Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"
             )
+
+        end_time = time.time()  # ⏱️ END TIMER
+
+        latency = end_time - start_time
+
         st.success(answer)
+
+        # ⏱️ Show latency
+        st.write(f"⏱️ Response Time: {latency:.2f} seconds")
