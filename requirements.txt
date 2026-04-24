@@ -1,8 +1,9 @@
-faiss-cpu
-sentence-transformers
-langchain-text-splitters
 streamlit
+sentence-transformers
+faiss-cpu
+transformers
+numpy
+langchain-text-splitters
 pypdf
 python-pptx
 groq
-numpy
